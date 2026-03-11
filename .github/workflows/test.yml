@@ -13,4 +13,4 @@ jobs:
 
       # 2. 执行你的命令
       - name: Run ls command
-        run: ls -l plan
+        run: pwd && ls -l plan/
