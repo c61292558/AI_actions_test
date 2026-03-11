@@ -1,0 +1,18 @@
+#!/bin/bash
+export PACKAGE_NAME="$DPKG_MAINTSCRIPT_PACKAGE"
+
+
+
+/opt/apps/$PACKAGE_NAME/files/bin/ace-init
+
+
+systemctl daemon-reload
+systemctl enable $PACKAGE_NAME-auto-upgrade
+systemctl start $PACKAGE_NAME-auto-upgrade
+
+        if [ -f /usr/lib/sysctl.d/$PACKAGE_NAME.conf ];then
+                sysctl -p /usr/lib/sysctl.d/$PACKAGE_NAME.conf
+        fi
+
+
+true

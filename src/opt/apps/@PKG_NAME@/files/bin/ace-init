@@ -1,0 +1,116 @@
+#!/bin/bash
+
+if [ "$(id -u)" != "0" ]; then
+    echo "当前用户不是 root 用户，退出"
+    exit
+fi
+if [ "$PACKAGE_NAME" = "" ];then
+curdir=`realpath $0`
+parent_dir=`dirname $curdir`
+pparent_dir=`dirname $parent_dir`
+ppparent_dir=`dirname $pparent_dir`
+PKGNAME=`basename $ppparent_dir`
+else
+
+PKGNAME=$PACKAGE_NAME
+fi
+chrootEnvPath=/opt/apps/$PKGNAME/files/ace-env
+if [ ! -e $chrootEnvPath ];then
+echo "Uncompress the env...."
+tar  -xvf $chrootEnvPath.tar.xz -C /opt/apps/$PKGNAME/files/
+fi
+
+HERE="$(dirname $(realpath $0))"
+
+function get_current_user() {
+    # 优先通过 who 命令获取用户
+    local user
+    user=$(who | awk '{print $1}' | head -n 1 2>/dev/null)
+
+    # 如果 who 无输出，则通过 loginctl 获取
+    if [[ -z "$user" ]]; then
+        user=$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $3}' | head -n 1)
+    fi
+
+    # 返回最终结果（可能为空）
+    echo "${user}"
+}
+non_root_user=$(get_current_user)
+uid=$(id -u $non_root_user)
+
+function bookworm-run(){
+bwrap --dev-bind $chrootEnvPath/ / \
+  --setenv PULSE_SERVER /run/user/$uid/pulse/native \
+  --setenv PATH /amber-ce-tools/bin-override:$PATH \
+  --setenv IS_ACE_ENV "1" \
+  --dev-bind-try /media /media \
+  --dev-bind-try /tmp /tmp \
+  --dev /dev  \
+  --dev-bind-try /dev/dri /dev/dri  \
+  --proc /proc  \
+  --dev-bind / /host \
+  --dev-bind /sys /sys  \
+  --dev-bind /run /run  \
+  --dev-bind-try /run/user/$uid/pulse /run/user/$uid/pulse  \
+  --bind-try /usr/share/themes /usr/local/share/themes  \
+  --bind-try /usr/share/icons /usr/local/share/icons  \
+  --bind-try /usr/share/fonts /usr/local/share/fonts  \
+  --hostname @HOST_NAME@ \
+  --unshare-uts \
+  --dev-bind-try /etc/resolv.conf /etc/resolv.conf \
+  --dev-bind-try /home /home \
+  $@
+
+
+}
+
+echo "Update the flamescion container tools"
+cp -r `dirname $chrootEnvPath`/amber-ce-tools/  $chrootEnvPath
+
+
+export container_user_gid="$(sudo -u $non_root_user id -rg)"
+export container_user_home="/home/${non_root_user}"
+export container_user_name="${non_root_user}"
+export container_user_uid="$(sudo -u $non_root_user id -ru)"
+
+
+
+
+#####init
+
+
+bookworm-run bash /amber-ce-tools/container-init/init.sh
+rm $chrootEnvPath/etc/localtime
+cp $(realpath /etc/localtime) $chrootEnvPath/etc/localtime
+chmod 777 $chrootEnvPath/etc/localtime 
+bookworm-run cp /host/etc/locale.gen /etc/locale.gen && locale-gen
+bookworm-run touch /finish.flag
+bookworm-run apt clean
+bookworm-run chown -R $(get_current_user)  /usr/lib/locale/
+sudo -u $(get_current_user) bwrap --dev-bind $chrootEnvPath/ / \
+  --setenv PULSE_SERVER /run/user/$uid/pulse/native \
+  --setenv PATH /amber-ce-tools/bin-override:$PATH \
+  --setenv IS_ACE_ENV "1" \
+  --dev-bind $chrootEnvPath/ / \
+  --dev-bind-try /media /media \
+  --dev-bind-try /tmp /tmp \
+  --dev /dev  \
+  --dev-bind-try /dev/dri /dev/dri  \
+  --proc /proc  \
+  --dev-bind /sys /sys  \
+  --dev-bind /run /run  \
+  --dev-bind-try /run/user/$uid/pulse /run/user/$uid/pulse  \
+  --dev-bind / /host \
+  --bind-try /usr/share/themes /usr/local/share/themes  \
+  --bind-try /usr/share/icons /usr/local/share/icons  \
+  --bind-try /usr/share/fonts /usr/local/share/fonts  \
+  --hostname @HOST_NAME@ \
+  --unshare-uts \
+  --dev-bind-try /etc/resolv.conf /etc/resolv.conf \
+  --dev-bind-try /home /home \
+  locale-gen
+bookworm-run update-locale LANG=$LANG
+chown -R root $chrootEnvPath
+chmod 777 -R $chrootEnvPath/usr/share/icons
+rm -vfr $chrootEnvPath/dev/*
+${HERE}/amber-ce-configure-nvidia || true

@@ -1,0 +1,98 @@
+#!/bin/bash
+# ===== Log =====
+# log.info xxx
+# log.warn xxx
+# log.info xxx
+# log.debug xxx
+# 带颜色的echo
+function log.color_output() {
+    local color=$1
+    shift 1
+
+    echo >&2 -e "\033[${color}m$@\033[0m"
+    return 0
+}
+
+# Log is named without prefix "utils." for convenience
+# Usage: log.log <level> ...content
+function log.log() {
+    if [[ $# < 2 ]]; then
+        return -1
+    fi
+
+    local level=$1
+    shift 1
+
+    case $level in
+    error) log.color_output "0;31" "[ERROR] $@" ;;
+    warn) log.color_output "1;33" "[WARN] $@" ;;
+    info) log.color_output "1;37" "[INFO] $@" ;;
+    debug) log.color_output "1;30" "[DEBUG] $@" ;;
+    esac
+
+    return 0
+}
+
+function log.error() { log.log "error" "$@"; }
+function log.warn() { log.log "warn" $@; }
+function log.info() { log.log "info" $@; }
+function log.debug() { log.log "debug" $@; }
+
+function do_integrate(){
+    local file=$1
+    if [ -f "$file" ]; then
+        # 获取文件名（不带.desktop后缀）作为X-AMBER-CE-DESKTOP-NAME的值
+        local desktop_name=$(basename "$file" .desktop)
+        
+        # 检查是否已经处理过（通过检查X-AMBER-CE-DESKTOP-NAME字段）
+        if ! grep -q "^X-AMBER-CE-DESKTOP-NAME=" "$file"; then
+            echo "$file is detected. Processing host system integration..."
+            
+            # 修改Exec行（如果尚未修改）
+            if ! grep -q "^Exec=@EXEC_NAME@ " "$file"; then
+                sed -i 's|^Exec=\(.*\)|Exec=@EXEC_NAME@ \1|' "$file"
+            fi
+            
+            # 删除TryExec行
+            sed -i '/^TryExec=/d' "$file"
+            
+            # 修改Name行（包括本地化Name）
+            sed -i '/^Name=/ s/$/ (@PRETTY_NAME@)/' "$file"
+            sed -i "/^Name\[${LANGUAGE}\]=/ s/\$/ (@PRETTY_NAME@)/" "$file"
+            
+            # 修改GenericName行（包括本地化GenericName）
+            sed -i '/^GenericName=/ s/$/ (@PRETTY_NAME@)/' "$file"
+            sed -i "/^GenericName\[${LANGUAGE}\]=/ s/\$/ (@PRETTY_NAME@)/" "$file"
+            
+            # 添加X-AMBER-CE-DESKTOP-NAME字段
+            echo "X-AMBER-CE-DESKTOP-NAME=${desktop_name}" >> "$file"
+            
+            # 处理Icon行
+            icon_line=$(grep "^Icon=" "$file")
+            if [[ "$icon_line" == "Icon=/"* ]]; then
+                # 如果Icon=后面接的是/，则添加前缀
+                sed -i 's|^Icon=/|Icon=/opt/apps/@PKG_NAME@/files/ace-env/|' "$file"
+            fi
+        fi
+    fi
+    chmod +x "$file"
+}
+
+if [ "${IS_ACE_ENV}" != "" ]; then
+    if [ -e /opt/apps/ ]; then
+        for app_dir in $(ls /opt/apps/); do
+            for file in /opt/apps/$app_dir/entries/applications/*.desktop; do
+                do_integrate "$file"
+            done
+        done
+    else
+        log.warn "No /opt/apps directory. Skip..."
+    fi
+    
+    for file in /usr/share/applications/*.desktop; do
+        do_integrate "$file"
+    done
+    find "/usr/share/applications/" -xtype l -delete
+else
+    log.error "DO NOT run me on host OS"
+fi

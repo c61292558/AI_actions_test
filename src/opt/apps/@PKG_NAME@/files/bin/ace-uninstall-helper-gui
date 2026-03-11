@@ -1,0 +1,77 @@
+#!/bin/bash
+if [ "$UID" != "0" ];then
+pkexec $0
+exit
+fi
+# 定义应用列表文件路径
+ACE_dir="/opt/apps/@PKG_NAME@/files/ace-env"
+HERE="$(dirname $(realpath $0))"
+# 读取所有.desktop文件，并构造应用列表
+app_list=()
+for file in "$ACE_dir"/usr/share/applications/*.desktop; do
+	if [ ! -e "$file" ];then ##可能是软链接，对主机来说无用
+	file=$ACE_dir$(readlink $file)
+	fi
+	if [ "$(grep -m 1 '^NoDisplay=' "$file" | cut -d '=' -f 2)" = "true" ] ||  [ "$(grep -m 1 '^NoDisplay=' "$file" | cut -d '=' -f 2)" = "True" ];then
+	continue
+	fi
+    # 读取应用名称和简介
+    name_orig=$(grep -m 1 '^Name=' "$file" | cut -d '=' -f 2)
+    name_i18n=$(grep -m 1 "^Name\[${LANGUAGE}\]\=" "$file" | cut -d '=' -f 2)
+	if [ -z "$name_i18n" ] ;then
+	name=$name_orig
+	else
+	name=$name_i18n
+	fi
+    comment_orig=$(grep -m 1 '^Comment=' "$file" | cut -d '=' -f 2)
+    comment_i18n=$(grep -m 1 "^Comment\[${LANGUAGE}\]\=" "$file" | cut -d '=' -f 2)
+    if [ -z "$comment_i18n" ] ;then
+	comment=$comment_orig
+	else
+	comment=$comment_i18n
+	fi
+    # 如果没有简介，则显示"N/A"
+    [[ -z "$comment" ]] && comment="N/A"
+    # 添加到应用列表数组
+    app_list+=("false" "$name" "$comment" "$file")
+done
+
+# 使用 Zenity 显示应用列表，并获取用户选择
+selected_apps=$(zenity --list --title "应用列表" --column "是否卸载" --column "应用名称" --column "应用介绍" --column "desktop文件位置" --checklist "${app_list[@]}" --print-column=4 --hide-column=4 --separator=" " --width=800 --height=400)
+
+
+# 检查用户是否做出了选择
+if [ -n "$selected_apps" ]; then
+    # 卸载选中的应用
+    (for app_desktop_path in $selected_apps; do
+        ${HERE}/ace-uninstall-helper "$app_desktop_path"
+	ret=$?
+	if [ "$ret" != "0" ];then
+	zenity --error --width 768 --text "$app_desktop_path 卸载失败，中止操作\n请手动执行\nsudo $0 $app_desktop_path \n查看报错！"
+	exit 1
+	break
+	fi
+    done ) &
+
+	cmd_pid=$!
+
+
+	(while kill -0 $cmd_pid 2> /dev/null; do
+        echo "# 正在执行..."
+        sleep 1
+    done)|  zenity --progress --text="正在执行卸载操作..." --pulsate --auto-close --no-cancel --width 400
+wait $cmd_pid
+cmd_status=$?
+
+    if [ "$cmd_status" = "1" ];then
+    zenity --error --width 200 --text  "卸载过程出现错误"
+    exit 1
+    else
+    zenity --info --width 200 --text "选定应用已卸载"
+    fi
+
+
+else
+    zenity --info --text "未选择任何应用"
+fi
+

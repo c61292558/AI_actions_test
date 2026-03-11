@@ -1,0 +1,4 @@
+#!/bin/bash
+if [ "${1}" = "triggered" ];then
+/opt/ace-host-integration/ace-host-integration
+fi

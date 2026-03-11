@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ "$UID" = "0" ];then
+/usr/bin/sudo $@
+else
+host-spawn sudo @EXEC_NAME@ sudo env IS_ACE_ENV="1" PATH="/amber-ce-tools/bin-override:$PATH" "$@"
+fi

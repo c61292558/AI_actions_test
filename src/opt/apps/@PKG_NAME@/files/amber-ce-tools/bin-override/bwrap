@@ -1,0 +1,2 @@
+#!/bin/bash
+host-spawn /opt/apps/@PKG_NAME@/files/bin/ace-run-bwrap "$@"

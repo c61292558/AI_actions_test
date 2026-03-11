@@ -1,0 +1,153 @@
+#!/bin/bash
+
+curdir=`realpath $0`
+parent_dir=`dirname $curdir`
+pparent_dir=`dirname $parent_dir`
+ppparent_dir=`dirname $pparent_dir`
+PKGNAME=`basename $ppparent_dir`
+export ACE_PACKAGE_NAME=$PKGNAME
+
+chrootEnvPath=/opt/apps/$PKGNAME/files/ace-env
+
+if [ ! -e $chrootEnvPath/finish.flag ];then
+
+if [ "$(id -u)" = "0" ]; then
+    `dirname $chrootEnvPath`/bin/ace-init
+else
+pkexec `dirname $chrootEnvPath`/bin/ace-init
+fi
+
+
+fi
+non_root_user=$(who  | awk '{print $1}' | head -n 1)
+uid=$(id -u $non_root_user)
+
+
+#### This part is for args pharm
+if [ "$1" = "" ];then
+container_command="bash"
+else
+container_command="$1"
+shift
+for arg in "$@"; do
+        arg="$(echo "${arg}x" | sed 's|'\''|'\'\\\\\'\''|g')"
+        arg="${arg%x}"
+        container_command="${container_command} '${arg}'"
+done
+fi
+#########################################################################################
+##########合成bwrap 1. 基础函数配置段
+# 初始化 EXEC_COMMAND 为 bwrap 基础指令
+EXEC_COMMAND="bwrap --dev-bind / / bwrap"
+
+# add_command 函数定义
+function add_command() {
+    # 参数拼接，考虑到转义和空格的处理
+    for arg in "$@"; do
+        EXEC_COMMAND="${EXEC_COMMAND} ${arg}"
+    done
+}
+
+function add_env_var() {
+    local var_name="${1}"
+    local var_value="${2}"
+    if [ "$var_value" != "" ]; then    
+	add_command "--setenv $var_name $var_value"
+	
+    fi
+}
+##########合成bwrap 2. 特殊需求函数配置段
+function cursor_theme_dir_integration() {
+
+local directory=""
+if [ "$(id -u)" = "0" ]; then #####We don't want bother root to install themes,but will try to fix the unwriteable issue
+	mkdir -p $chrootEnvPath/usr/share/icons
+	chmod 777 -R $chrootEnvPath/usr/share/icons
+	return
+fi
+
+for directory in "/usr/share/icons"/*; do
+    # 检查是否为目录
+    if [ -d "$directory" ]; then
+        # 检查目录中是否存在 cursors 文件
+        if [ -d "$directory/cursors" ]; then
+        	if [ -w $chrootEnvPath/usr/share/icons ];then
+			add_command "--ro-bind-try $directory $directory"
+		fi
+        fi
+    fi
+done
+
+
+
+
+
+
+
+}
+##########合成bwrap 3. 环境变量和目录绑定配置段
+# 添加环境变量和其他初始设置
+ENV_VARS=(
+    "FAKEROOTDONTTRYCHOWN 1"
+    "PULSE_SERVER /run/user/\$uid/pulse/native"
+    "PATH /amber-ce-tools/bin-override:\$PATH"
+    "IS_ACE_ENV 1"
+    "XDG_DATA_DIRS /amber-ce-tools/additional-data-dir-in-container:\$XDG_DATA_DIRS"
+)
+
+BIND_DIRS=(
+    "--dev-bind $chrootEnvPath/ /"
+    "--dev-bind-try /media /media"
+    "--dev-bind-try /mnt /mnt"
+    "--dev-bind-try /tmp /tmp"
+    "--dev-bind-try /data /data"
+    "--dev-bind-try /dev /dev"
+    "--proc /proc"
+    "--dev-bind /sys /sys"
+    "--dev-bind /run /run"
+    "--dev-bind-try /run/user/\$uid/pulse /run/user/\$uid/pulse"
+    "--dev-bind / /host"
+    "--ro-bind-try /usr/share/themes /usr/local/share/themes"
+    "--ro-bind-try /usr/share/icons /usr/local/share/icons"
+    "--ro-bind-try /usr/share/fonts /usr/local/share/fonts"
+    "--dev-bind-try /etc/resolv.conf /etc/resolv.conf"
+    "--dev-bind-try /home /home"
+)
+EXTRA_ARGS=(
+    "--hostname @HOST_NAME@"
+    "--unshare-uts"
+    "--cap-add CAP_SYS_ADMIN"
+)
+
+EXTRA_SCRIPTS=(
+    cursor_theme_dir_integration
+)
+
+##########合成bwrap 4. 合成并执行指令
+# 逐一添加到 EXEC_COMMAND
+for var in "${ENV_VARS[@]}"; do
+    add_env_var $var
+done
+
+for var in "${BIND_DIRS[@]}"; do
+    add_command "$var"
+done
+
+for var in "${EXTRA_ARGS[@]}"; do
+    add_command "$var"
+done
+
+for var in "${EXTRA_SCRIPTS[@]}"; do
+    $var
+done
+
+# 添加最终的 bash 命令
+add_command "bash -c \"${container_command}\""
+
+# 输出完整的 EXEC_COMMAND 以查看
+# echo "${EXEC_COMMAND}"
+
+# 注意: 实际执行时，请确保所有变量（如 $uid, $chrootEnvPath 等）都已正确定义
+eval ${EXEC_COMMAND}
+
+

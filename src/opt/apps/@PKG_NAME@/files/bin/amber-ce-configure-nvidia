@@ -1,0 +1,66 @@
+#!/bin/bash
+log.warn() { echo -e "[\e[33mWARN\e[0m]:  \e[1m$*\e[0m"; }
+log.error()  { echo -e "[\e[31mERROR\e[0m]: \e[1m$*\e[0m"; }
+log.info() { echo -e "[\e[96mINFO\e[0m]:  \e[1m$*\e[0m"; }
+log.debug()  { echo -e "[\e[32mDEBUG\e[0m]: \e[1m$*\e[0m"; }
+
+if [ "$UID" != "0" ];then
+log.error "需要以root权限运行 Need to be run as root."
+exit 1
+fi
+
+# 1\. 获取宿主机 NVIDIA 驱动版本
+nvidia_version=$(cat /sys/module/nvidia/version 2>/dev/null)
+if [ -z "$nvidia_version" ]; then
+    log.warn "无法获取 NVIDIA 驱动版本 Can not determine NVIDIA Driver version"
+    exit 1
+fi
+
+# 2\. 目标目录准备
+ACE_DIR="/opt/apps/@PKG_NAME@/files/ace-env"
+if [[ ! -e "${ACE_DIR}" ]];then
+log.error "未检测到 @PKG_NAME@安装，请安装后再试 @PKG_NAME@ is not detected. Please try again after installation"
+log.info "请按回车关闭... Press Enter to close..."
+read
+exit 1
+fi
+mkdir -p "$ACE_DIR/usr/lib" "$ACE_DIR/usr/lib32"
+
+log.info "正在链接 NVIDIA 驱动库 Linking NVIDIA Driver Libs"
+
+# 3\. 收集库文件路径
+lib_list=$(ldconfig -p | grep -Ei "nvidia|libcuda" | cut -d'>' -f2)
+
+# 4\. 复制库文件
+copied=0
+for lib in $lib_list; do
+    resolved=$(readlink -f "$lib") # 解析符号链接
+    if file "$resolved" | grep -q "32-bit"; then
+        ln -sf "/host/$resolved" "$ACE_DIR/usr/lib32/$(basename $lib)"
+    else
+        ln -sf "/host/$resolved" "$ACE_DIR/usr/lib/$(basename $lib)"
+        copied=1
+    fi
+done
+
+# 5\. 复制辅助文件
+additional_files=(
+    /usr/share/vulkan/icd.d/nvidia_icd.json
+    /usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json
+)
+for file in "${additional_files[@]}"; do
+    if [ -f "$file" ]; then
+        file=$(readlink -f "$file")
+        dir=$(dirname "$file")
+        mkdir -p "$ACE_DIR/$dir"
+        ln -sf "/host/$file" "$ACE_DIR/$dir"
+    fi
+done
+
+# 6\. 标记版本
+if [ $copied -eq 1 ]; then
+    echo "$nvidia_version" > "$ACE_DIR/current_version"
+    log.info "NVIDIA 驱动库已成功链接 Nvidia Driver Libs are successfully linked. "
+else
+    log.info "未找到有效 NVIDIA 库文件 No valid NVIDIA Driver Libs found."
+fi

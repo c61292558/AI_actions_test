@@ -1,0 +1,11 @@
+[Desktop Entry]
+Categories=utils
+Exec=@EXEC_NAME@ %U
+Icon=@PKG_NAME@
+Name=@PRETTY_NAME@
+Name[zh_CN]=@PRETTY_NAME@
+Keywords=BCM,ACE,ace,mode
+StartupNotify=true
+Type=Application
+Terminal=false
+Categories=System

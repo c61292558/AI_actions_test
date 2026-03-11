@@ -1,0 +1,9 @@
+Package: ace-host-integration
+Version: 1.2.2
+Section: misc
+Priority: optional
+Depends: bash
+Maintainer: shenmo <shenmo@spark-app.store>
+Architecture: all
+Conflicts: @PKG_NAME@
+Description: ace-host-integration

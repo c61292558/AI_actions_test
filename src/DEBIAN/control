@@ -1,0 +1,10 @@
+Package: @PKG_NAME@
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: EIC
+Depends: bubblewrap
+Section: misc
+Priority: optional
+Multi-Arch: foreign
+Homepage: https://gitee.com/amber-ce/amber-ce-bookworm/
+Description: bwrap wrapper for install and running debs inside a @PRETTY_NAME@ container
