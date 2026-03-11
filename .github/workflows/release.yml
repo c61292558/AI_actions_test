@@ -36,48 +36,49 @@ jobs:
         id: ai_build
         env:
           GH_TOKEN: ${{ github.token }}
+          # 强制将配置目录指向当前工作空间
           GEMINI_CONFIG_DIR: ${{ github.workspace }}/.gemini
         run: |
-          # A. 安装容器
+          # 1. 关键修复：提前创建配置目录并确保完全可写
+          mkdir -p "$GEMINI_CONFIG_DIR"
+          chmod 777 "$GEMINI_CONFIG_DIR"
+          
+          # 2. 安装 gemini-cli 并指定本地安装目录
+          npm install @google/gemini-cli
+          GEMINI_CMD="$(pwd)/node_modules/.bin/gemini"
+          
+          # 3. 验证连通性
+          echo ">>> 正在验证 Gemini CLI 环境..."
+          $GEMINI_CMD -y "你好" || { echo "CLI 测试失败，请检查 API Key"; exit 1; }
+
+          # 4. 安装容器并同步 plan
           wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
           sudo apt-get install -y ./trixie.deb
           
-          # B. 将 plan 放置到容器内绝对路径，确保无视挂载限制
-          # 容器根目录通常映射在 /opt/apps/amber-ce-trixie/files/ace-env
           CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
           sudo mkdir -p "$CONTAINER_ROOT/plan_data"
           sudo cp -r plan/* "$CONTAINER_ROOT/plan_data/"
-          sudo chmod -R 777 "$CONTAINER_ROOT/plan_data/"
-
-          # C. 开始 Agent 循环
-          LOG_HISTORY="容器已就绪。文件已复制至容器内: /plan_data/"
           
-          while true; do
-            # 严格限制 AI 输出格式，只允许输出 Shell 命令
-            PROMPT="你现在是系统专家。当前容器内数据路径: /plan_data/。
-            请只输出你需要执行的 Shell 命令。不要包含解释，不要包含 Markdown 格式，不要包含 ``` 符号。
-            若安装完成，最后一行必须输出 'COMPLETED: /可执行文件路径'。
-            上一步历史回显: $LOG_HISTORY"
-
-            NEXT_STEP=$(npx -y @google/gemini-cli -y "$PROMPT" --model gemini-3.1-flash-lite-preview)
+          # 5. Agent 循环 (直接使用预先定位好的 GEMINI_CMD)
+          LOG_HISTORY="容器已就绪。plan文件位于 /plan_data/"
+          
+          for i in {1..10}; do
+            PROMPT="系统专家。任务：在容器内安装 /plan_data/ 下的包。
+            输出规范：只输出 Shell 命令，不要Markdown，不要解释。安装完成最后一行回复 'COMPLETED: /绝对路径'。
+            历史结果: $LOG_HISTORY"
             
-            # 过滤：如果是 COMPLETED 开头则跳出
+            NEXT_STEP=$($GEMINI_CMD -y "$PROMPT" --model gemini-3.1-flash-lite-preview)
+            echo "AI 指令: $NEXT_STEP"
+            
             if [[ "$NEXT_STEP" == COMPLETED:* ]]; then
               echo "AEXEC=$(echo $NEXT_STEP | cut -d':' -f2 | xargs)" >> $GITHUB_ENV
               break
             fi
             
-            echo "正在容器内执行: $NEXT_STEP"
-            # 执行命令并清理可能存在的非法字符
             CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1)
             LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
-            echo "回显: $CMD_OUT"
+            echo "执行回显: $CMD_OUT"
           done
-
-          # D. 压缩上传
-          sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
-          gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber || gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" --notes "Auto"
-
       - name: 4. 封装最终 DEB
         env:
           GH_TOKEN: ${{ github.token }}
