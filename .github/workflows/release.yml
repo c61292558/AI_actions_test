@@ -16,126 +16,94 @@ jobs:
       - name: 1. 检出代码
         uses: actions/checkout@v4
 
-      - name: 2. 初始化环境 (Gemini CLI)
+      - name: 2. 初始化环境
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils jq curl
-          # 不使用 -g，改用直接调用，或者明确添加到 PATH
-          npm install @google/gemini-cli
-          
-          # 明确设置 Gemini 执行路径
-          GEMINI_BIN="$(pwd)/node_modules/.bin/gemini"
-          echo "GEMINI_BIN=$GEMINI_BIN" >> $GITHUB_ENV
-          
           find . -name "*.sh" -exec chmod +x {} +
-          echo "GOOGLE_GEMINI_BASE_URL=https://generativelanguage.googleapis.com" >> $GITHUB_ENV
+          # API Key 在 Secrets 中名为 GOO
           echo "GEMINI_API_KEY=${{ secrets.GOO }}" >> $GITHUB_ENV
-          echo "GEMINI_MODEL=models/gemini-3-flash-preview" >> $GITHUB_ENV
-          
-          # 校验是否能找到命令
-          echo ">>> 测试 Gemini CLI 调用:"
-          $GEMINI_BIN --version || (echo "Gemini CLI 找不到！" && exit 1)
-          
-          # 测试 AI 连通性
-          echo ">>> 正在连接 AI 模型..."
-          $GEMINI_BIN -y "你好" || (echo "AI 接口调用失败，请检查 Secret Key！" && exit 1)
-          echo "AI 配置验证成功！"
 
       - name: 3. AI 容器内交互构建
         id: ai_build
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 检查是否已有环境包
+          # 定义 AI 函数 (使用 curl 避免 npm 路径和权限报错)
+          ai_ask() {
+            curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
+              -H 'Content-Type: application/json' \
+              -X POST \
+              -d "{ \"contents\": [{ \"parts\": [{ \"text\": \"$1\" }] }] }" \
+              | jq -r '.candidates[0].content.parts[0].text'
+          }
+
+          # 检查 Release 是否已有环境包
           ASSET_STATUS=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[] | select(.name=="ace-env.tar.xz") | .name' || echo "none")
           
           if [ "$ASSET_STATUS" == "ace-env.tar.xz" ]; then
             gh release download ${{ github.ref_name }} -p "ace-env.tar.xz"
           else
-            # A: 安装容器本体
+            # A: 安装容器
             wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
             sudo apt-get install -y ./trixie.deb
 
-            # B: 重要：将 plan 文件夹同步到容器的内部路径，确保容器内可见
-            # 假设容器根目录在 /opt/apps/amber-ce-trixie/files/ace-env
+            # B: 将 plan 文件夹同步到容器环境内
             CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
             sudo mkdir -p "$CONTAINER_ROOT/tmp/plan"
             sudo cp -r plan/* "$CONTAINER_ROOT/tmp/plan/"
             sudo chmod -R 777 "$CONTAINER_ROOT/tmp/plan"
 
             # C: AI 交互循环
-            LOG_HISTORY="[Initial] 容器已就绪。plan 文件夹已同步到容器内的 /tmp/plan 路径。"
-            AEXEC_PATH=""
-
-            echo ">>> 开始 AI 交互构建..."
+            LOG_HISTORY="容器就绪。已同步文件: $(ls -l plan/)"
+            
+            echo ">>> 开始 AI 交互..."
             while true; do
-              # 这里的提示词明确要求 AI 在容器内操作
-              NEXT_STEP=$(gemini -y "你现在是运行在 trixie-run 容器环境中的专家。
-              历史日志：$LOG_HISTORY
-              任务：
-              1. 必须先执行 'ls -l /tmp/plan' 查看待安装内容。
-              2. 使用 'apt-get install' 安装 /tmp/plan 中的 deb 包，或编译源码。
-              3. 如果报错缺失依赖，请务必执行修复命令。
-              4. 确认程序在容器内可运行后，返回 'COMPLETED: /容器内可执行文件绝对路径'。
-              请给出下一条要在容器内执行的命令：")
-
-              echo "AI 建议指令: $NEXT_STEP"
+              PROMPT="你现在是系统专家。历史日志: $LOG_HISTORY。目标: 在 trixie-run 容器内安装 /tmp/plan/ 中的文件。
+              要求：1. 执行 'ls -l /tmp/plan' 确认文件。 2. 安装或编译。 3. 安装完成后必须回复 'COMPLETED: /容器内可执行路径'。
+              如果失败请输出下一条修复命令。"
+              
+              NEXT_STEP=$(ai_ask "$PROMPT")
+              echo "AI 指令: $NEXT_STEP"
 
               if [[ "$NEXT_STEP" == COMPLETED:* ]]; then
-                AEXEC_PATH=$(echo "$NEXT_STEP" | cut -d':' -f2 | xargs)
-                echo "AEXEC=$AEXEC_PATH" >> $GITHUB_ENV
+                echo "AEXEC=$(echo $NEXT_STEP | cut -d':' -f2 | xargs)" >> $GITHUB_ENV
                 break
               fi
 
-              # 在容器内部执行指令并回显
-              CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1 || true)
-              echo "执行回显: $CMD_OUT"
+              CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1 || echo "执行错误")
+              echo "回显: $CMD_OUT"
               LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
             done
 
-            # D: 准备 data 目录并清理临时文件
+            # D: 压缩与上传
             sudo mkdir -p "$CONTAINER_ROOT/data"
             sudo chmod 777 "$CONTAINER_ROOT/data"
-            sudo rm -rf "$CONTAINER_ROOT/tmp/plan"
-
-            # E: 压缩环境并上传
             sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
             gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" || echo "Release exists"
             gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber
           fi
 
-      - name: 4. 封装最终 DEB
+      - name: 4. 生成并发布 DEB
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 获取包名
           PKG_NAME=$(grep -oP '@PKG_NAME@\s*=\s*\K[^ ]+' ace-base.config || echo "org.videolan.www.vlc")
           
-          # 构建 pkg 目录
+          # 构建与权限修复
           sudo ./debian-build.sh
+          [ -d "pkg/DEBIAN" ] && sudo chmod 755 pkg/DEBIAN/post* pkg/DEBIAN/pre*
           
-          # 核心修复：DEBIAN 脚本权限
-          if [ -d "pkg/DEBIAN" ]; then
-            sudo chmod 755 pkg/DEBIAN/post* || true
-            sudo chmod 755 pkg/DEBIAN/pre* || true
-          fi
-
-          # 移动环境包并注入变量
+          # 环境包准备
           TARGET_DIR="pkg/opt/apps/$PKG_NAME/files"
           sudo mkdir -p "$TARGET_DIR"
           sudo chmod -R 777 "pkg/opt/apps/$PKG_NAME"
           [ -f "ace-env.tar.xz" ] && sudo mv ace-env.tar.xz "$TARGET_DIR/"
           
-          # 注入 AEXEC 到 Desktop
+          # 修改 Desktop 文件
           DESKTOP_FILE="pkg/usr/share/applications/$PKG_NAME.desktop"
-          if [ -f "$DESKTOP_FILE" ]; then
-             sudo sed -i "s/\($PKG_NAME-run\)/\1 ${{ env.AEXEC }}/" "$DESKTOP_FILE"
-          fi
+          [ -f "$DESKTOP_FILE" ] && sudo sed -i "s/\($PKG_NAME-run\)/\1 ${{ env.AEXEC }}/" "$DESKTOP_FILE"
           
-          # 覆盖图标
-          ICON_SRC=$(find plan/ -name "*.png" | head -n 1)
-          [ -n "$ICON_SRC" ] && sudo cp "$ICON_SRC" "pkg/usr/share/icons/$PKG_NAME.png"
-          
-          # 打包上传
+          # 打包与上传
           sudo ./check_pkg.sh
           sudo ./"执行打包.sh"
           gh release upload ${{ github.ref_name }} *.deb --clobber
