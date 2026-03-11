@@ -16,12 +16,13 @@ jobs:
       - name: 1. 检出代码
         uses: actions/checkout@v4
 
-      - name: 2. 预检环境与连通性
+      - name: 2. 初始化环境 (连通性测试)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils jq curl
-          # 建立 Gemini 配置本地目录，避免权限报错
+          # 建立 Gemini 配置本地目录，赋予读写权限
           export GEMINI_CONFIG_DIR=$(pwd)/.gemini
           mkdir -p $GEMINI_CONFIG_DIR
+          chmod 777 $GEMINI_CONFIG_DIR
           
           echo ">>> 阶段 1: CURL 基础连通性测试..."
           CURL_OUT=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
@@ -29,56 +30,59 @@ jobs:
             -d '{"contents": [{"parts": [{"text": "你好"}]}]}')
           [[ "$CURL_OUT" == *"parts"* ]] || { echo "CURL 失败"; exit 1; }
 
-          echo ">>> 阶段 2: Gemini-CLI 环境测试..."
-          npx -y @google/gemini-cli -y "你好" || { echo "Gemini-CLI 失败"; exit 1; }
+          echo ">>> 阶段 2: Gemini-CLI 安装与测试..."
+          npm install @google/gemini-cli
+          # 强制指定配置文件路径
+          GEMINI_CMD=$(pwd)/node_modules/.bin/gemini
+          GEMINI_CONFIG_DIR=$(pwd)/.gemini $GEMINI_CMD -y "你好" || { echo "Gemini-CLI 失败"; exit 1; }
 
       - name: 3. AI 容器交互构建
         id: ai_build
         env:
           GH_TOKEN: ${{ github.token }}
-          # 强制将配置目录指向当前工作空间
           GEMINI_CONFIG_DIR: ${{ github.workspace }}/.gemini
         run: |
-          # 1. 关键修复：提前创建配置目录并确保完全可写
-          mkdir -p "$GEMINI_CONFIG_DIR"
-          chmod 777 "$GEMINI_CONFIG_DIR"
+          GEMINI_CMD=$(pwd)/node_modules/.bin/gemini
           
-          # 2. 安装 gemini-cli 并指定本地安装目录
-          npm install @google/gemini-cli
-          GEMINI_CMD="$(pwd)/node_modules/.bin/gemini"
-          
-          # 3. 验证连通性
-          echo ">>> 正在验证 Gemini CLI 环境..."
-          $GEMINI_CMD -y "你好" || { echo "CLI 测试失败，请检查 API Key"; exit 1; }
-
-          # 4. 安装容器并同步 plan
+          # A. 安装容器
           wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
           sudo apt-get install -y ./trixie.deb
           
+          # B. 物理同步 plan 目录至容器内部
           CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
           sudo mkdir -p "$CONTAINER_ROOT/plan_data"
           sudo cp -r plan/* "$CONTAINER_ROOT/plan_data/"
-          
-          # 5. Agent 循环 (直接使用预先定位好的 GEMINI_CMD)
-          LOG_HISTORY="容器已就绪。plan文件位于 /plan_data/"
+          sudo chmod -R 777 "$CONTAINER_ROOT/plan_data/"
+
+          # C. 开始 Agent 循环
+          LOG_HISTORY="容器已就绪。文件已复制至容器内: /plan_data/"
           
           for i in {1..10}; do
-            PROMPT="系统专家。任务：在容器内安装 /plan_data/ 下的包。
-            输出规范：只输出 Shell 命令，不要Markdown，不要解释。安装完成最后一行回复 'COMPLETED: /绝对路径'。
-            历史结果: $LOG_HISTORY"
+            PROMPT="你是系统专家。任务：在 trixie-run 容器内安装 /plan_data/ 中的内容。
+            【严格要求】：
+            1. 只输出可直接执行的 Bash 命令。
+            2. 不要输出任何Markdown代码块、不要解释文字。
+            3. 若安装完成，最后一行必须输出 'COMPLETED: /可执行文件路径'。
+            上一步历史回显: $LOG_HISTORY"
+
+            NEXT_STEP=$(GEMINI_CONFIG_DIR=$(pwd)/.gemini $GEMINI_CMD -y "$PROMPT" --model gemini-3.1-flash-lite-preview)
             
-            NEXT_STEP=$($GEMINI_CMD -y "$PROMPT" --model gemini-3.1-flash-lite-preview)
-            echo "AI 指令: $NEXT_STEP"
-            
+            # 过滤：如果是 COMPLETED 开头则跳出
             if [[ "$NEXT_STEP" == COMPLETED:* ]]; then
               echo "AEXEC=$(echo $NEXT_STEP | cut -d':' -f2 | xargs)" >> $GITHUB_ENV
               break
             fi
             
+            echo "正在容器内执行: $NEXT_STEP"
             CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1)
             LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
-            echo "执行回显: $CMD_OUT"
+            echo "回显: $CMD_OUT"
           done
+
+          # D. 压缩上传
+          sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
+          gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber || gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" --notes "Auto"
+
       - name: 4. 封装最终 DEB
         env:
           GH_TOKEN: ${{ github.token }}
