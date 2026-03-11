@@ -19,24 +19,14 @@ jobs:
       - name: 2. 初始化环境 (测试连通性)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils jq curl
-          # 定义 AI 测试函数
           ai_ask() {
             curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
-              -H 'Content-Type: application/json' \
-              -X POST \
+              -H 'Content-Type: application/json' -X POST \
               -d "{ \"contents\": [{ \"parts\": [{ \"text\": \"$1\" }] }] }" \
               | jq -r '.candidates[0].content.parts[0].text'
           }
-          
-          echo ">>> 正在测试 Gemini API 连通性..."
-          # 发送你好
           RESPONSE=$(ai_ask "你好")
-          echo "AI 响应: $RESPONSE"
-          
-          if [ -z "$RESPONSE" ] || [ "$RESPONSE" == "null" ]; then
-            echo "错误: AI 连接失败，请检查 GOO Secret 是否有效！"
-            exit 1
-          fi
+          if [ -z "$RESPONSE" ] || [ "$RESPONSE" == "null" ]; then exit 1; fi
           echo "AI 连通性测试通过！"
 
       - name: 3. AI 容器交互构建
@@ -46,34 +36,34 @@ jobs:
         run: |
           ai_ask() {
             curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
-              -H 'Content-Type: application/json' \
-              -X POST \
+              -H 'Content-Type: application/json' -X POST \
               -d "{ \"contents\": [{ \"parts\": [{ \"text\": \"$1\" }] }] }" \
               | jq -r '.candidates[0].content.parts[0].text'
           }
 
-          # 检查 Release 是否已有环境包
+          PROJECT_PLAN="/home/runner/work/AI_actions_test/AI_actions_test/plan"
           ASSET_STATUS=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[] | select(.name=="ace-env.tar.xz") | .name' || echo "none")
           
           if [ "$ASSET_STATUS" == "ace-env.tar.xz" ]; then
             gh release download ${{ github.ref_name }} -p "ace-env.tar.xz"
           else
-            # 只有测试通过后，才会执行此处的容器下载与安装
             wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
             sudo apt-get install -y ./trixie.deb
 
+            # 核心修改：通过建立目录软连接/挂载，确保容器内能通过指定绝对路径访问
+            # 我们将 plan 挂载到容器根目录下的 /host_plan
             CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
-            sudo mkdir -p "$CONTAINER_ROOT/tmp/plan"
-            sudo cp -r plan/* "$CONTAINER_ROOT/tmp/plan/"
-            sudo chmod -R 777 "$CONTAINER_ROOT/tmp/plan"
+            sudo mkdir -p "$CONTAINER_ROOT/host_plan"
+            sudo mount --bind "$PROJECT_PLAN" "$CONTAINER_ROOT/host_plan"
 
-            LOG_HISTORY="容器已就绪。文件列表: $(ls -l plan/)"
+            LOG_HISTORY="容器已就绪。计划安装文件已挂载至容器内路径: /host_plan"
             echo ">>> 启动 AI 代理循环..."
             
             while true; do
-              PROMPT="你现在是系统专家。当前容器内 /tmp/plan 目录内容: $(ls -l /tmp/plan)。
-              任务：在 trixie-run 容器内安装或编译。成功后输出 'COMPLETED: /容器内可执行文件路径'。
-              如果报错请修复。历史执行结果: $LOG_HISTORY"
+              PROMPT="你现在是系统专家。任务：在 trixie-run 容器内安装 /host_plan/ 中的内容。
+              1. 先执行 'ls -l /host_plan'。
+              2. 安装完成后输出 'COMPLETED: /容器内路径'。
+              历史: $LOG_HISTORY"
               
               NEXT_STEP=$(ai_ask "$PROMPT")
               echo "AI 指令: $NEXT_STEP"
@@ -88,8 +78,6 @@ jobs:
               LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
             done
 
-            sudo mkdir -p "$CONTAINER_ROOT/data"
-            sudo chmod 777 "$CONTAINER_ROOT/data"
             sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
             gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber || gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" --notes "Auto"
           fi
@@ -112,4 +100,4 @@ jobs:
           
           sudo ./check_pkg.sh
           sudo ./"执行打包.sh"
-          gh release upload ${{ github.ref_name }} *.deb --
+          gh release upload ${{ github.ref_name }} *.deb --clobber
