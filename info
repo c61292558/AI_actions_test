@@ -1,0 +1,19 @@
+{
+  "appid": "cn.google.chrome-pre",
+  "name": "google-chrome-stable",
+  "version": "138.0.7204.183-1",
+  "arch": [
+    "amd64"
+  ],
+  "permissions": {
+    "autostart": false,
+    "notification": true,
+    "trayicon": true,
+    "clipboard": true,
+    "account": true,
+    "bluetooth": true,
+    "camera": true,
+    "audio_record": true,
+    "installed_apps": true
+  }
+}
