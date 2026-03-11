@@ -13,4 +13,4 @@ jobs:
 
       # 2. 执行你的命令
       - name: Run ls command
-        run: pwd && ls -l plan/
+        run: pwd && ls -l plan/ && ls -l /home/runner/work/AI_actions_test/AI_actions_test/plan
