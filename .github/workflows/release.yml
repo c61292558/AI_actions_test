@@ -19,14 +19,26 @@ jobs:
       - name: 2. 初始化环境 (Gemini CLI)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils jq curl
-          npm install -g @google/gemini-cli
+          # 不使用 -g，改用直接调用，或者明确添加到 PATH
+          npm install @google/gemini-cli
+          
+          # 明确设置 Gemini 执行路径
+          GEMINI_BIN="$(pwd)/node_modules/.bin/gemini"
+          echo "GEMINI_BIN=$GEMINI_BIN" >> $GITHUB_ENV
+          
           find . -name "*.sh" -exec chmod +x {} +
           echo "GOOGLE_GEMINI_BASE_URL=https://generativelanguage.googleapis.com" >> $GITHUB_ENV
           echo "GEMINI_API_KEY=${{ secrets.GOO }}" >> $GITHUB_ENV
           echo "GEMINI_MODEL=models/gemini-3.1-flash-lite-preview" >> $GITHUB_ENV
           
+          # 校验是否能找到命令
+          echo ">>> 测试 Gemini CLI 调用:"
+          $GEMINI_BIN --version || (echo "Gemini CLI 找不到！" && exit 1)
+          
           # 测试 AI 连通性
-          gemini -y "你好" && echo "AI 配置验证成功"
+          echo ">>> 正在连接 AI 模型..."
+          $GEMINI_BIN -y "你好" || (echo "AI 接口调用失败，请检查 Secret Key！" && exit 1)
+          echo "AI 配置验证成功！"
 
       - name: 3. AI 容器内交互构建
         id: ai_build
