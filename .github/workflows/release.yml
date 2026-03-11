@@ -16,71 +16,67 @@ jobs:
       - name: 1. 检出代码
         uses: actions/checkout@v4
 
-      - name: 2. 初始化环境 (测试连通性)
+      - name: 2. 预检环境与连通性
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils jq curl
-          ai_ask() {
-            curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
-              -H 'Content-Type: application/json' -X POST \
-              -d "{ \"contents\": [{ \"parts\": [{ \"text\": \"$1\" }] }] }" \
-              | jq -r '.candidates[0].content.parts[0].text'
-          }
-          RESPONSE=$(ai_ask "你好")
-          if [ -z "$RESPONSE" ] || [ "$RESPONSE" == "null" ]; then exit 1; fi
-          echo "AI 连通性测试通过！"
+          # 建立 Gemini 配置本地目录，避免权限报错
+          export GEMINI_CONFIG_DIR=$(pwd)/.gemini
+          mkdir -p $GEMINI_CONFIG_DIR
+          
+          echo ">>> 阶段 1: CURL 基础连通性测试..."
+          CURL_OUT=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
+            -H 'Content-Type: application/json' -X POST \
+            -d '{"contents": [{"parts": [{"text": "你好"}]}]}')
+          [[ "$CURL_OUT" == *"parts"* ]] || { echo "CURL 失败"; exit 1; }
+
+          echo ">>> 阶段 2: Gemini-CLI 环境测试..."
+          npx -y @google/gemini-cli -y "你好" || { echo "Gemini-CLI 失败"; exit 1; }
 
       - name: 3. AI 容器交互构建
         id: ai_build
         env:
           GH_TOKEN: ${{ github.token }}
+          GEMINI_CONFIG_DIR: ${{ github.workspace }}/.gemini
         run: |
-          ai_ask() {
-            curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
-              -H 'Content-Type: application/json' -X POST \
-              -d "{ \"contents\": [{ \"parts\": [{ \"text\": \"$1\" }] }] }" \
-              | jq -r '.candidates[0].content.parts[0].text'
-          }
-
-          PROJECT_PLAN="/home/runner/work/AI_actions_test/AI_actions_test/plan"
-          ASSET_STATUS=$(gh release view ${{ github.ref_name }} --json assets -q '.assets[] | select(.name=="ace-env.tar.xz") | .name' || echo "none")
+          # A. 安装容器
+          wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
+          sudo apt-get install -y ./trixie.deb
           
-          if [ "$ASSET_STATUS" == "ace-env.tar.xz" ]; then
-            gh release download ${{ github.ref_name }} -p "ace-env.tar.xz"
-          else
-            wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
-            sudo apt-get install -y ./trixie.deb
+          # B. 将 plan 放置到容器内绝对路径，确保无视挂载限制
+          # 容器根目录通常映射在 /opt/apps/amber-ce-trixie/files/ace-env
+          CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
+          sudo mkdir -p "$CONTAINER_ROOT/plan_data"
+          sudo cp -r plan/* "$CONTAINER_ROOT/plan_data/"
+          sudo chmod -R 777 "$CONTAINER_ROOT/plan_data/"
 
-            # 核心修改：通过建立目录软连接/挂载，确保容器内能通过指定绝对路径访问
-            # 我们将 plan 挂载到容器根目录下的 /host_plan
-            CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
-            sudo mkdir -p "$CONTAINER_ROOT/host_plan"
-            sudo mount --bind "$PROJECT_PLAN" "$CONTAINER_ROOT/host_plan"
+          # C. 开始 Agent 循环
+          LOG_HISTORY="容器已就绪。文件已复制至容器内: /plan_data/"
+          
+          while true; do
+            # 严格限制 AI 输出格式，只允许输出 Shell 命令
+            PROMPT="你现在是系统专家。当前容器内数据路径: /plan_data/。
+            请只输出你需要执行的 Shell 命令。不要包含解释，不要包含 Markdown 格式，不要包含 ``` 符号。
+            若安装完成，最后一行必须输出 'COMPLETED: /可执行文件路径'。
+            上一步历史回显: $LOG_HISTORY"
 
-            LOG_HISTORY="容器已就绪。计划安装文件已挂载至容器内路径: /host_plan"
-            echo ">>> 启动 AI 代理循环..."
+            NEXT_STEP=$(npx -y @google/gemini-cli -y "$PROMPT" --model gemini-3.1-flash-lite-preview)
             
-            while true; do
-              PROMPT="你现在是系统专家。任务：在 trixie-run 容器内安装 /host_plan/ 中的内容。
-              1. 先执行 'ls -l /host_plan'。
-              2. 安装完成后输出 'COMPLETED: /容器内路径'。
-              历史: $LOG_HISTORY"
-              
-              NEXT_STEP=$(ai_ask "$PROMPT")
-              echo "AI 指令: $NEXT_STEP"
+            # 过滤：如果是 COMPLETED 开头则跳出
+            if [[ "$NEXT_STEP" == COMPLETED:* ]]; then
+              echo "AEXEC=$(echo $NEXT_STEP | cut -d':' -f2 | xargs)" >> $GITHUB_ENV
+              break
+            fi
+            
+            echo "正在容器内执行: $NEXT_STEP"
+            # 执行命令并清理可能存在的非法字符
+            CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1)
+            LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
+            echo "回显: $CMD_OUT"
+          done
 
-              if [[ "$NEXT_STEP" == COMPLETED:* ]]; then
-                echo "AEXEC=$(echo $NEXT_STEP | cut -d':' -f2 | xargs)" >> $GITHUB_ENV
-                break
-              fi
-
-              CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1 || echo "执行错误")
-              echo "执行回显: $CMD_OUT"
-              LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
-            done
-
-            sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
-            gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber || gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" --notes "Auto"
-          fi
+          # D. 压缩上传
+          sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
+          gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber || gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" --notes "Auto"
 
       - name: 4. 封装最终 DEB
         env:
@@ -88,11 +84,10 @@ jobs:
         run: |
           PKG_NAME=$(grep -oP '@PKG_NAME@\s*=\s*\K[^ ]+' ace-base.config || echo "org.videolan.www.vlc")
           sudo ./debian-build.sh
-          [ -d "pkg/DEBIAN" ] && sudo chmod 755 pkg/DEBIAN/post* pkg/DEBIAN/pre*
+          [ -d "pkg/DEBIAN" ] && sudo chmod 755 pkg/DEBIAN/post*
           
           TARGET_DIR="pkg/opt/apps/$PKG_NAME/files"
           sudo mkdir -p "$TARGET_DIR"
-          sudo chmod -R 777 "pkg/opt/apps/$PKG_NAME"
           [ -f "ace-env.tar.xz" ] && sudo mv ace-env.tar.xz "$TARGET_DIR/"
           
           DESKTOP_FILE="pkg/usr/share/applications/$PKG_NAME.desktop"
