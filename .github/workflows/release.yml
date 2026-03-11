@@ -16,19 +16,34 @@ jobs:
       - name: 1. 检出代码
         uses: actions/checkout@v4
 
-      - name: 2. 初始化环境
+      - name: 2. 初始化环境 (测试连通性)
         run: |
           sudo apt-get update && sudo apt-get install -y wget xz-utils jq curl
-          find . -name "*.sh" -exec chmod +x {} +
-          # API Key 在 Secrets 中名为 GOO
-          echo "GEMINI_API_KEY=${{ secrets.GOO }}" >> $GITHUB_ENV
+          # 定义 AI 测试函数
+          ai_ask() {
+            curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
+              -H 'Content-Type: application/json' \
+              -X POST \
+              -d "{ \"contents\": [{ \"parts\": [{ \"text\": \"$1\" }] }] }" \
+              | jq -r '.candidates[0].content.parts[0].text'
+          }
+          
+          echo ">>> 正在测试 Gemini API 连通性..."
+          # 发送你好
+          RESPONSE=$(ai_ask "你好")
+          echo "AI 响应: $RESPONSE"
+          
+          if [ -z "$RESPONSE" ] || [ "$RESPONSE" == "null" ]; then
+            echo "错误: AI 连接失败，请检查 GOO Secret 是否有效！"
+            exit 1
+          fi
+          echo "AI 连通性测试通过！"
 
-      - name: 3. AI 容器内交互构建
+      - name: 3. AI 容器交互构建
         id: ai_build
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 定义 AI 函数 (使用 curl 避免 npm 路径和权限报错)
           ai_ask() {
             curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent?key=${{ secrets.GOO }}" \
               -H 'Content-Type: application/json' \
@@ -43,24 +58,22 @@ jobs:
           if [ "$ASSET_STATUS" == "ace-env.tar.xz" ]; then
             gh release download ${{ github.ref_name }} -p "ace-env.tar.xz"
           else
-            # A: 安装容器
+            # 只有测试通过后，才会执行此处的容器下载与安装
             wget -O trixie.deb "https://share.spark-app.store/index.php?share/fileDownload&user=1&sid=Ua5mg4sP&path=%2FAmber-CE%2FTrixie%2FDEB%2Famber-ce-trixie_13.8.5_amd64.deb"
             sudo apt-get install -y ./trixie.deb
 
-            # B: 将 plan 文件夹同步到容器环境内
             CONTAINER_ROOT="/opt/apps/amber-ce-trixie/files/ace-env"
             sudo mkdir -p "$CONTAINER_ROOT/tmp/plan"
             sudo cp -r plan/* "$CONTAINER_ROOT/tmp/plan/"
             sudo chmod -R 777 "$CONTAINER_ROOT/tmp/plan"
 
-            # C: AI 交互循环
-            LOG_HISTORY="容器就绪。已同步文件: $(ls -l plan/)"
+            LOG_HISTORY="容器已就绪。文件列表: $(ls -l plan/)"
+            echo ">>> 启动 AI 代理循环..."
             
-            echo ">>> 开始 AI 交互..."
             while true; do
-              PROMPT="你现在是系统专家。历史日志: $LOG_HISTORY。目标: 在 trixie-run 容器内安装 /tmp/plan/ 中的文件。
-              要求：1. 执行 'ls -l /tmp/plan' 确认文件。 2. 安装或编译。 3. 安装完成后必须回复 'COMPLETED: /容器内可执行路径'。
-              如果失败请输出下一条修复命令。"
+              PROMPT="你现在是系统专家。当前容器内 /tmp/plan 目录内容: $(ls -l /tmp/plan)。
+              任务：在 trixie-run 容器内安装或编译。成功后输出 'COMPLETED: /容器内可执行文件路径'。
+              如果报错请修复。历史执行结果: $LOG_HISTORY"
               
               NEXT_STEP=$(ai_ask "$PROMPT")
               echo "AI 指令: $NEXT_STEP"
@@ -71,39 +84,32 @@ jobs:
               fi
 
               CMD_OUT=$(sudo trixie-run bash -c "$NEXT_STEP" 2>&1 || echo "执行错误")
-              echo "回显: $CMD_OUT"
+              echo "执行回显: $CMD_OUT"
               LOG_HISTORY="CMD: $NEXT_STEP | OUT: $CMD_OUT"
             done
 
-            # D: 压缩与上传
             sudo mkdir -p "$CONTAINER_ROOT/data"
             sudo chmod 777 "$CONTAINER_ROOT/data"
             sudo tar -cJf ace-env.tar.xz -C /opt/apps/amber-ce-trixie/files ace-env
-            gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" || echo "Release exists"
-            gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber
+            gh release upload ${{ github.ref_name }} ace-env.tar.xz --clobber || gh release create ${{ github.ref_name }} --title "${{ github.ref_name }}" --notes "Auto"
           fi
 
-      - name: 4. 生成并发布 DEB
+      - name: 4. 封装最终 DEB
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           PKG_NAME=$(grep -oP '@PKG_NAME@\s*=\s*\K[^ ]+' ace-base.config || echo "org.videolan.www.vlc")
-          
-          # 构建与权限修复
           sudo ./debian-build.sh
           [ -d "pkg/DEBIAN" ] && sudo chmod 755 pkg/DEBIAN/post* pkg/DEBIAN/pre*
           
-          # 环境包准备
           TARGET_DIR="pkg/opt/apps/$PKG_NAME/files"
           sudo mkdir -p "$TARGET_DIR"
           sudo chmod -R 777 "pkg/opt/apps/$PKG_NAME"
           [ -f "ace-env.tar.xz" ] && sudo mv ace-env.tar.xz "$TARGET_DIR/"
           
-          # 修改 Desktop 文件
           DESKTOP_FILE="pkg/usr/share/applications/$PKG_NAME.desktop"
           [ -f "$DESKTOP_FILE" ] && sudo sed -i "s/\($PKG_NAME-run\)/\1 ${{ env.AEXEC }}/" "$DESKTOP_FILE"
           
-          # 打包与上传
           sudo ./check_pkg.sh
           sudo ./"执行打包.sh"
-          gh release upload ${{ github.ref_name }} *.deb --clobber
+          gh release upload ${{ github.ref_name }} *.deb --
